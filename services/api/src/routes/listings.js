@@ -21,11 +21,29 @@ const listingSchema = z.object({
 });
 
 router.get("/", async (_req, res) => {
+  const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
   const { data, error } = await supabaseAdmin
     .from("listings")
     .select("id,owner_id,title,category,description,quantity_note,available_from,available_until,pickup_area,location_lat,location_lng,status,created_at")
     .eq("status", "active")
+    .gte("created_at", recentCutoff)
     .or(`available_until.is.null,available_until.gte.${new Date().toISOString()}`)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ listings: data ?? [] });
+});
+
+router.get("/mine", requireAuth, async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from("listings")
+    .select("id,owner_id,title,category,description,quantity_note,available_from,available_until,pickup_area,location_lat,location_lng,status,created_at")
+    .eq("owner_id", req.user.sub)
+    .neq("status", "removed")
     .order("created_at", { ascending: false });
 
   if (error) {

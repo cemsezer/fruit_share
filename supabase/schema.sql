@@ -6,9 +6,15 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text unique,
   display_name text,
+  address_text text,
+  address_lat double precision,
+  address_lng double precision,
+  collection_view text not null default 'all' check (collection_view in ('all', 'nearby')),
+  collection_radius_km integer check (collection_radius_km is null or (collection_radius_km between 1 and 100)),
   role text not null default 'user' check (role in ('user', 'admin')),
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint profiles_address_pair check ((address_lat is null and address_lng is null) or (address_lat is not null and address_lng is not null))
 );
 
 create table if not exists public.listings (

@@ -10,6 +10,20 @@ const respondSchema = z.object({
   decision: z.enum(["accepted", "rejected"])
 });
 
+router.get("/mine", requireAuth, async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from("collection_requests")
+    .select("id,status,created_at,listings(id,title,category,pickup_area,available_from,available_until,status,owner_id)")
+    .eq("requester_id", req.user.sub)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ requests: data ?? [] });
+});
+
 router.post("/:id/respond", requireAuth, async (req, res) => {
   const requestId = req.params.id;
   const parsed = respondSchema.safeParse(req.body);

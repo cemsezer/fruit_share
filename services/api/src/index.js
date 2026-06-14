@@ -6,6 +6,7 @@ import morgan from "morgan";
 import healthRoutes from "./routes/health.js";
 import listingsRoutes from "./routes/listings.js";
 import moderationRoutes from "./routes/moderation.js";
+import profileRoutes from "./routes/profile.js";
 import requestsRoutes from "./routes/requests.js";
 
 const app = express();
@@ -24,6 +25,7 @@ app.use(express.json());
 app.use(morgan("dev"));
 
 app.use(healthRoutes);
+app.use("/api/profile", profileRoutes);
 app.use("/api/listings", listingsRoutes);
 app.use("/api/requests", requestsRoutes);
 app.use("/api/moderation", moderationRoutes);

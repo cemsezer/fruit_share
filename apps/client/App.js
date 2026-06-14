@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
+  ImageBackground,
   Platform,
   Pressable,
   SafeAreaView,
@@ -22,6 +23,7 @@ import { supabase } from "./src/lib/supabase";
 WebBrowser.maybeCompleteAuthSession();
 
 const categories = ["Fruit", "Vegetable", "Herbs", "Other"];
+const headerImageUrl = "https://images.unsplash.com/photo-1610832958506-aa56368176cf?auto=format&fit=crop&w=1200&q=80";
 
 const initialListingForm = {
   title: "",
@@ -34,6 +36,27 @@ const initialListingForm = {
   location_lat: null,
   location_lng: null
 };
+
+const initialProfileForm = {
+  display_name: "",
+  address_text: "",
+  address_lat: null,
+  address_lng: null,
+  collection_view: "all",
+  collection_radius_km: "10"
+};
+
+function distanceInKm(firstLat, firstLng, secondLat, secondLng) {
+  const earthRadiusKm = 6371;
+  const latitudeDelta = ((secondLat - firstLat) * Math.PI) / 180;
+  const longitudeDelta = ((secondLng - firstLng) * Math.PI) / 180;
+  const firstLatitude = (firstLat * Math.PI) / 180;
+  const secondLatitude = (secondLat * Math.PI) / 180;
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(firstLatitude) * Math.cos(secondLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
 
 function toDateTimeInputValue(value) {
   if (!value) {
@@ -96,6 +119,15 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [listErrors, setListErrors] = useState([]);
   const [listStatus, setListStatus] = useState("");
+  const [accountListings, setAccountListings] = useState([]);
+  const [accountRequests, setAccountRequests] = useState([]);
+  const [accountErrors, setAccountErrors] = useState([]);
+  const [loadingAccount, setLoadingAccount] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [profileForm, setProfileForm] = useState(initialProfileForm);
+  const [profileErrors, setProfileErrors] = useState([]);
+  const [profileStatus, setProfileStatus] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
   const [authForm, setAuthForm] = useState({ email: "", password: "" });
   const [form, setForm] = useState(initialListingForm);
   const [formErrors, setFormErrors] = useState([]);
@@ -110,12 +142,23 @@ export default function App() {
   const redirectTo = useMemo(() => Linking.createURL("/auth/callback"), []);
   const filteredListings = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-
-    if (!query) {
-      return listings;
-    }
+    const shouldFilterNearby = profile?.collection_view === "nearby"
+      && profile.address_lat != null
+      && profile.address_lng != null
+      && profile.collection_radius_km != null;
+    const radiusKm = Number(profile?.collection_radius_km || 0);
 
     return listings.filter((item) => {
+      if (shouldFilterNearby) {
+        if (item.location_lat == null || item.location_lng == null) {
+          return false;
+        }
+
+        if (distanceInKm(profile.address_lat, profile.address_lng, item.location_lat, item.location_lng) > radiusKm) {
+          return false;
+        }
+      }
+
       const searchableText = [
         item.title,
         item.category,
@@ -127,9 +170,9 @@ export default function App() {
         .join(" ")
         .toLowerCase();
 
-      return searchableText.includes(query);
+      return !query || searchableText.includes(query);
     });
-  }, [listings, searchQuery]);
+  }, [listings, profile, searchQuery]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -150,6 +193,21 @@ export default function App() {
     loadListings();
   }, []);
 
+  useEffect(() => {
+    if (activeScreen === "account" && session?.access_token) {
+      loadAccountDetails();
+    }
+  }, [activeScreen, session?.access_token]);
+
+  useEffect(() => {
+    if (session?.access_token) {
+      loadProfile();
+    } else {
+      setProfile(null);
+      setProfileForm(initialProfileForm);
+    }
+  }, [session?.access_token]);
+
   async function loadListings() {
     try {
       setLoadingListings(true);
@@ -160,6 +218,101 @@ export default function App() {
       setListErrors([error.message]);
     } finally {
       setLoadingListings(false);
+    }
+  }
+
+  async function loadAccountDetails() {
+    if (!session?.access_token) {
+      return;
+    }
+
+    try {
+      setLoadingAccount(true);
+      setAccountErrors([]);
+      const [listingsData, requestsData] = await Promise.all([
+        apiFetch("/api/listings/mine", session.access_token),
+        apiFetch("/api/requests/mine", session.access_token)
+      ]);
+      setAccountListings(listingsData.listings || []);
+      setAccountRequests(requestsData.requests || []);
+    } catch (error) {
+      setAccountErrors([error.message]);
+    } finally {
+      setLoadingAccount(false);
+    }
+  }
+
+  async function loadProfile() {
+    if (!session?.access_token) {
+      return;
+    }
+
+    try {
+      const data = await apiFetch("/api/profile/me", session.access_token);
+      setProfile(data.profile);
+      setProfileForm(profileToForm(data.profile));
+    } catch (error) {
+      setProfileErrors([error.message]);
+    }
+  }
+
+  function openProfileEdit() {
+    setProfileErrors([]);
+    setProfileStatus("");
+    setProfileForm(profileToForm(profile, session?.user?.email));
+    setActiveScreen("profileEdit");
+  }
+
+  async function fillProfileLocation() {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert("Permission needed", "Location permission was not granted.");
+      return;
+    }
+    const position = await Location.getCurrentPositionAsync({});
+    setProfileForm((prev) => ({
+      ...prev,
+      address_lat: Number(position.coords.latitude.toFixed(4)),
+      address_lng: Number(position.coords.longitude.toFixed(4))
+    }));
+  }
+
+  async function saveProfile() {
+    if (!session?.access_token) {
+      setProfileErrors(["Please sign in before editing your account."]);
+      return;
+    }
+
+    const validationErrors = validateProfileForm(profileForm);
+    setProfileErrors(validationErrors);
+    setProfileStatus("");
+
+    if (validationErrors.length > 0) {
+      return;
+    }
+
+    try {
+      setSavingProfile(true);
+      const data = await apiFetch("/api/profile/me", session.access_token, {
+        method: "PUT",
+        body: JSON.stringify({
+          display_name: profileForm.display_name.trim(),
+          address_text: profileForm.address_text.trim() || null,
+          address_lat: profileForm.address_lat,
+          address_lng: profileForm.address_lng,
+          collection_view: profileForm.collection_view,
+          collection_radius_km: profileForm.collection_view === "nearby" ? Number(profileForm.collection_radius_km) : null
+        })
+      });
+      setProfile(data.profile);
+      setProfileForm(profileToForm(data.profile));
+      setProfileErrors([]);
+      setProfileStatus("Account details saved.");
+      setActiveScreen("account");
+    } catch (error) {
+      setProfileErrors([error.message]);
+    } finally {
+      setSavingProfile(false);
     }
   }
 
@@ -205,6 +358,7 @@ export default function App() {
 
       setAuthErrors([]);
       setAuthStatus("Signed in successfully.");
+      setActiveScreen("home");
     } finally {
       setAuthAction("");
     }
@@ -233,6 +387,9 @@ export default function App() {
 
       setAuthErrors([]);
       setAuthStatus(data.session ? "Account created and signed in." : "Account created. Check your email to confirm your account.");
+      if (data.session) {
+        setActiveScreen("home");
+      }
     } finally {
       setAuthAction("");
     }
@@ -240,6 +397,12 @@ export default function App() {
 
   async function signOut() {
     await supabase.auth.signOut();
+    setActiveScreen("home");
+    setAccountListings([]);
+    setAccountRequests([]);
+    setProfile(null);
+    setProfileErrors([]);
+    setProfileStatus("");
   }
 
   async function fillApproxLocation() {
@@ -383,16 +546,15 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.headerPanel}>
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.kicker}>Local surplus produce</Text>
-            <Text style={styles.heading}>Fruit Share</Text>
-            <Text style={styles.subheading}>Find garden fruit and veg nearby, or offer what would otherwise go to waste.</Text>
+        <ImageBackground source={{ uri: headerImageUrl }} style={styles.headerPanel} imageStyle={styles.headerImage}>
+          <View style={styles.headerOverlay}>
+            <View style={styles.headerTextBlock}>
+              <Text style={styles.kicker}>Local surplus produce</Text>
+              <Text style={styles.heading}>Fruit Share</Text>
+              <Text style={styles.subheading}>Find garden fruit and veg nearby, or offer what would otherwise go to waste.</Text>
+            </View>
           </View>
-          <Pressable style={styles.headerButton} onPress={() => setActiveScreen("publish")}>
-            <Text style={styles.headerButtonText}>Offer Produce</Text>
-          </Pressable>
-        </View>
+        </ImageBackground>
 
         <View style={styles.navRow}>
           <Pressable
@@ -405,7 +567,7 @@ export default function App() {
             style={[styles.navButton, activeScreen === "publish" && styles.navButtonActive]}
             onPress={() => setActiveScreen("publish")}
           >
-            <Text style={activeScreen === "publish" ? styles.navButtonTextActive : styles.navButtonText}>{editingListingId ? "Edit" : "Publish"}</Text>
+            <Text style={activeScreen === "publish" ? styles.navButtonTextActive : styles.navButtonText}>{editingListingId ? "Edit" : "Offer Produce"}</Text>
           </Pressable>
         </View>
 
@@ -416,62 +578,250 @@ export default function App() {
                 <Text style={styles.accountLabel}>Signed in</Text>
                 <Text style={styles.userText}>{session.user?.email}</Text>
               </View>
-              <Pressable style={styles.secondaryButton} onPress={signOut}>
-                <Text style={styles.secondaryButtonText}>Sign Out</Text>
-              </Pressable>
+              <View style={styles.accountActions}>
+                <Pressable style={styles.linkButton} onPress={() => setActiveScreen("account")}>
+                  <Text style={styles.linkButtonText}>User details</Text>
+                </Pressable>
+                <Pressable style={styles.secondaryButton} onPress={signOut}>
+                  <Text style={styles.secondaryButtonText}>Sign Out</Text>
+                </Pressable>
+              </View>
             </View>
           ) : (
-            <View style={styles.authButtons}>
-              <TextInput
-                style={styles.input}
-                placeholder="Email"
-                autoCapitalize="none"
-                keyboardType="email-address"
-                value={authForm.email}
-                onChangeText={(value) => setAuthForm((prev) => ({ ...prev, email: value }))}
-              />
-              <TextInput
-                style={styles.input}
-                placeholder="Password"
-                secureTextEntry
-                value={authForm.password}
-                onChangeText={(value) => setAuthForm((prev) => ({ ...prev, password: value }))}
-              />
+            <Pressable style={styles.accountButton} onPress={() => setActiveScreen("auth")}>
+              <Text style={styles.accountButtonText}>Login/Create an account</Text>
+            </Pressable>
+          )}
+        </View>
 
-              {authErrors.length > 0 ? (
+        {activeScreen === "profileEdit" ? (
+          <View style={styles.formCard}>
+            <View style={styles.formHeaderRow}>
+              <View>
+                <Text style={styles.sectionEyebrow}>Account settings</Text>
+                <Text style={styles.formTitle}>Edit User Details</Text>
+              </View>
+              <Pressable style={styles.smallButton} onPress={() => setActiveScreen("account")}>
+                <Text style={styles.smallButtonText}>Back</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>Username</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Username"
+                value={profileForm.display_name}
+                onChangeText={(value) => setProfileForm((prev) => ({ ...prev, display_name: value }))}
+              />
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>Password</Text>
+              <TextInput style={styles.input} value="********" secureTextEntry editable={false} />
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>Add my address (optional)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Street, neighborhood, or town"
+                value={profileForm.address_text}
+                onChangeText={(value) => setProfileForm((prev) => ({ ...prev, address_text: value }))}
+              />
+              {profileForm.address_lat != null && profileForm.address_lng != null ? (
+                <Text style={styles.locationStatus}>Address location saved for radius filtering.</Text>
+              ) : null}
+              <Pressable style={styles.secondaryButton} onPress={fillProfileLocation}>
+                <Text style={styles.secondaryButtonText}>Use My Current Location for Radius</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>Collections to show</Text>
+              <View style={styles.categoryRow}>
+                <Pressable
+                  style={[styles.categoryChip, profileForm.collection_view === "all" && styles.categoryChipActive]}
+                  onPress={() => setProfileForm((prev) => ({ ...prev, collection_view: "all" }))}
+                >
+                  <Text style={profileForm.collection_view === "all" ? styles.categoryChipTextActive : styles.categoryChipText}>All collections</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.categoryChip, profileForm.collection_view === "nearby" && styles.categoryChipActive]}
+                  onPress={() => setProfileForm((prev) => ({ ...prev, collection_view: "nearby" }))}
+                >
+                  <Text style={profileForm.collection_view === "nearby" ? styles.categoryChipTextActive : styles.categoryChipText}>Within radius</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            {profileForm.collection_view === "nearby" ? (
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Radius from my address</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="10"
+                  keyboardType="numeric"
+                  value={String(profileForm.collection_radius_km)}
+                  onChangeText={(value) => setProfileForm((prev) => ({ ...prev, collection_radius_km: value }))}
+                />
+              </View>
+            ) : null}
+
+            {profileErrors.length > 0 ? (
+              <View style={styles.errorBox}>
+                {profileErrors.map((error) => (
+                  <Text key={error} style={styles.errorText}>{error}</Text>
+                ))}
+              </View>
+            ) : null}
+
+            {profileStatus ? <Text style={styles.successText}>{profileStatus}</Text> : null}
+
+            <Pressable style={[styles.primaryButton, savingProfile && styles.disabledButton]} onPress={saveProfile} disabled={savingProfile}>
+              <Text style={styles.primaryButtonText}>{savingProfile ? "Saving..." : "Save User Details"}</Text>
+            </Pressable>
+          </View>
+        ) : activeScreen === "account" ? (
+          <View style={styles.screenStack}>
+            <View style={styles.formCard}>
+              <View style={styles.formHeaderRow}>
+                <View>
+                  <Text style={styles.sectionEyebrow}>User details</Text>
+                  <Text style={styles.formTitle}>Your Account</Text>
+                </View>
+                <View style={styles.accountHeaderActions}>
+                  <Pressable style={styles.smallButton} onPress={openProfileEdit}>
+                    <Text style={styles.smallButtonText}>Edit</Text>
+                  </Pressable>
+                  <Pressable style={styles.smallButton} onPress={() => setActiveScreen("home")}>
+                    <Text style={styles.smallButtonText}>Back</Text>
+                  </Pressable>
+                </View>
+              </View>
+              <Text style={styles.accountItemMeta}>{profile?.display_name || "Username not set"}</Text>
+              <Text style={styles.userText}>{session?.user?.email}</Text>
+              {profile?.collection_view === "nearby" && profile?.collection_radius_km ? (
+                <Text style={styles.accountItemMeta}>Showing collections within {profile.collection_radius_km} km of your saved location.</Text>
+              ) : (
+                <Text style={styles.accountItemMeta}>Showing all collections.</Text>
+              )}
+              {profileStatus ? <Text style={styles.successText}>{profileStatus}</Text> : null}
+              {profileErrors.length > 0 ? (
                 <View style={styles.errorBox}>
-                  {authErrors.map((error) => (
+                  {profileErrors.map((error) => (
                     <Text key={error} style={styles.errorText}>{error}</Text>
                   ))}
                 </View>
               ) : null}
+              {loadingAccount ? <Text style={styles.mutedText}>Loading account details...</Text> : null}
+              {accountErrors.length > 0 ? (
+                <View style={styles.errorBox}>
+                  {accountErrors.map((error) => (
+                    <Text key={error} style={styles.errorText}>{error}</Text>
+                  ))}
+                </View>
+              ) : null}
+            </View>
 
-              {authStatus ? <Text style={styles.successText}>{authStatus}</Text> : null}
-
-              <View style={styles.authActionRow}>
-                <Pressable
-                  style={[styles.primaryButton, styles.authActionButton, authAction && styles.disabledButton]}
-                  onPress={signInWithEmail}
-                  disabled={Boolean(authAction)}
-                >
-                  <Text style={styles.primaryButtonText}>{authAction === "sign-in" ? "Signing in..." : "Sign In"}</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.secondaryButton, styles.authActionButton, authAction && styles.disabledButton]}
-                  onPress={signUpWithEmail}
-                  disabled={Boolean(authAction)}
-                >
-                  <Text style={styles.secondaryButtonText}>{authAction === "sign-up" ? "Creating..." : "Sign Up"}</Text>
-                </Pressable>
+            <View style={styles.formCard}>
+              <View>
+                <Text style={styles.sectionEyebrow}>Your garden shares</Text>
+                <Text style={styles.formTitle}>Offered Produce</Text>
               </View>
-              <Pressable style={[styles.primaryButton, authAction && styles.disabledButton]} onPress={() => signInWithProvider("google")} disabled={Boolean(authAction)}>
-                <Text style={styles.primaryButtonText}>Continue with Google</Text>
+              {accountListings.length === 0 && !loadingAccount ? (
+                <Text style={styles.emptyText}>You have not offered any produce yet.</Text>
+              ) : null}
+              {accountListings.map((item) => (
+                <View key={item.id} style={styles.accountItem}>
+                  <Text style={styles.accountItemTitle}>{item.title}</Text>
+                  <Text style={styles.accountItemMeta}>{item.category} · {item.status}</Text>
+                  <Text style={styles.accountItemMeta}>{item.pickup_area}</Text>
+                  <View style={styles.authActionRow}>
+                    <Pressable style={[styles.secondaryButton, styles.authActionButton]} onPress={() => startEditingListing(item)}>
+                      <Text style={styles.secondaryButtonText}>Edit</Text>
+                    </Pressable>
+                    <Pressable style={[styles.dangerInlineButton, styles.authActionButton]} onPress={() => deleteListing(item)}>
+                      <Text style={styles.dangerInlineButtonText}>Delete</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+
+            <View style={styles.formCard}>
+              <View>
+                <Text style={styles.sectionEyebrow}>Your pickups</Text>
+                <Text style={styles.formTitle}>Collections</Text>
+              </View>
+              {accountRequests.length === 0 && !loadingAccount ? (
+                <Text style={styles.emptyText}>You have not requested any collections yet.</Text>
+              ) : null}
+              {accountRequests.map((request) => (
+                <View key={request.id} style={styles.accountItem}>
+                  <Text style={styles.accountItemTitle}>{request.listings?.title || "Produce listing"}</Text>
+                  <Text style={styles.accountItemMeta}>Request status: {request.status}</Text>
+                  <Text style={styles.accountItemMeta}>{request.listings?.pickup_area || "Pickup area unavailable"}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : activeScreen === "auth" ? (
+          <View style={styles.formCard}>
+            <View>
+              <Text style={styles.sectionEyebrow}>Your account</Text>
+              <Text style={styles.formTitle}>Login or Create Account</Text>
+            </View>
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={authForm.email}
+              onChangeText={(value) => setAuthForm((prev) => ({ ...prev, email: value }))}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              secureTextEntry
+              value={authForm.password}
+              onChangeText={(value) => setAuthForm((prev) => ({ ...prev, password: value }))}
+            />
+
+            {authErrors.length > 0 ? (
+              <View style={styles.errorBox}>
+                {authErrors.map((error) => (
+                  <Text key={error} style={styles.errorText}>{error}</Text>
+                ))}
+              </View>
+            ) : null}
+
+            {authStatus ? <Text style={styles.successText}>{authStatus}</Text> : null}
+
+            <View style={styles.authActionRow}>
+              <Pressable
+                style={[styles.primaryButton, styles.authActionButton, authAction && styles.disabledButton]}
+                onPress={signInWithEmail}
+                disabled={Boolean(authAction)}
+              >
+                <Text style={styles.primaryButtonText}>{authAction === "sign-in" ? "Signing in..." : "Sign In"}</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.secondaryButton, styles.authActionButton, authAction && styles.disabledButton]}
+                onPress={signUpWithEmail}
+                disabled={Boolean(authAction)}
+              >
+                <Text style={styles.secondaryButtonText}>{authAction === "sign-up" ? "Creating..." : "Sign Up"}</Text>
               </Pressable>
             </View>
-          )}
-        </View>
-
-        {activeScreen === "home" ? (
+            <Pressable style={[styles.primaryButton, authAction && styles.disabledButton]} onPress={() => signInWithProvider("google")} disabled={Boolean(authAction)}>
+              <Text style={styles.primaryButtonText}>Continue with Google</Text>
+            </Pressable>
+            <Pressable style={styles.secondaryButton} onPress={() => setActiveScreen("home")}> 
+              <Text style={styles.secondaryButtonText}>Back to Listings</Text>
+            </Pressable>
+          </View>
+        ) : activeScreen === "home" ? (
           <View style={styles.screenStack}>
             <View style={styles.searchPanel}>
               <View>
@@ -498,6 +848,13 @@ export default function App() {
             {listStatus ? <Text style={styles.successText}>{listStatus}</Text> : null}
             {loadingListings ? <Text style={styles.mutedText}>Loading listings...</Text> : null}
 
+            <View style={styles.listHeaderRow}>
+              <View>
+                <Text style={styles.sectionEyebrow}>Posted this week</Text>
+                <Text style={styles.listTitle}>Most Recent Listings</Text>
+              </View>
+            </View>
+
             <FlatList
               data={filteredListings}
               keyExtractor={(item) => item.id}
@@ -515,8 +872,8 @@ export default function App() {
               )}
               ListEmptyComponent={(
                 <View style={styles.emptyPanel}>
-                  <Text style={styles.emptyTitle}>{searchQuery ? "No matches found" : "No listings yet"}</Text>
-                  <Text style={styles.emptyText}>{searchQuery ? "Try a different pickup area or produce description." : "Be the first to offer surplus fruit or veg nearby."}</Text>
+                  <Text style={styles.emptyTitle}>{searchQuery ? "No matches found" : "No recent listings yet"}</Text>
+                  <Text style={styles.emptyText}>{searchQuery ? "Try a different pickup area or produce description." : "Only listings posted within the last 7 days appear here."}</Text>
                   <Pressable style={styles.primaryButton} onPress={() => setActiveScreen("publish")}>
                     <Text style={styles.primaryButtonText}>Offer Produce</Text>
                   </Pressable>
@@ -629,9 +986,19 @@ const styles = StyleSheet.create({
     paddingBottom: 28
   },
   headerPanel: {
-    backgroundColor: "#203b35",
     borderRadius: 18,
+    minHeight: 220,
+    overflow: "hidden"
+  },
+  headerImage: {
+    borderRadius: 18
+  },
+  headerOverlay: {
+    backgroundColor: "rgba(22, 38, 32, 0.58)",
+    flex: 1,
     gap: 16,
+    justifyContent: "flex-end",
+    minHeight: 220,
     padding: 18
   },
   headerTextBlock: {
@@ -651,17 +1018,6 @@ const styles = StyleSheet.create({
   subheading: {
     color: "#d8e7dd",
     lineHeight: 20
-  },
-  headerButton: {
-    alignSelf: "flex-start",
-    backgroundColor: "#f7c66a",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10
-  },
-  headerButtonText: {
-    color: "#21322f",
-    fontWeight: "800"
   },
   navRow: {
     backgroundColor: "#dde8df",
@@ -688,14 +1044,27 @@ const styles = StyleSheet.create({
     fontWeight: "800"
   },
   authBox: {
-    backgroundColor: "#ffffff",
-    borderRadius: 16,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: "#dce6df"
+    backgroundColor: "transparent"
   },
   authButtons: {
     gap: 8
+  },
+  accountButton: {
+    alignItems: "center",
+    alignSelf: "stretch",
+    backgroundColor: "#315c72",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#24485a",
+    minHeight: 50,
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 13
+  },
+  accountButtonText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "800"
   },
   authActionRow: {
     flexDirection: "row",
@@ -710,6 +1079,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12
   },
+  accountActions: {
+    alignItems: "flex-end",
+    gap: 8
+  },
   accountLabel: {
     color: "#6b7a72",
     fontSize: 12,
@@ -719,6 +1092,14 @@ const styles = StyleSheet.create({
   userText: {
     color: "#253a33",
     fontWeight: "700"
+  },
+  linkButton: {
+    paddingHorizontal: 4,
+    paddingVertical: 2
+  },
+  linkButtonText: {
+    color: "#315c72",
+    fontWeight: "800"
   },
   screenStack: {
     gap: 12
@@ -769,6 +1150,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8
   },
+  accountHeaderActions: {
+    flexDirection: "row",
+    gap: 8
+  },
   smallButton: {
     backgroundColor: "#e8efe4",
     borderRadius: 10,
@@ -778,6 +1163,24 @@ const styles = StyleSheet.create({
   smallButtonText: {
     color: "#2d3c2b",
     fontWeight: "700"
+  },
+  accountItem: {
+    backgroundColor: "#f8fbf8",
+    borderColor: "#dce6df",
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 6,
+    padding: 12
+  },
+  accountItemTitle: {
+    color: "#203b35",
+    fontSize: 16,
+    fontWeight: "800"
+  },
+  accountItemMeta: {
+    color: "#52645a",
+    fontSize: 13,
+    fontWeight: "600"
   },
   input: {
     borderWidth: 1,
@@ -865,11 +1268,33 @@ const styles = StyleSheet.create({
     color: "#2d3c2b",
     fontWeight: "700"
   },
+  dangerInlineButton: {
+    alignItems: "center",
+    backgroundColor: "#ffe8e0",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  dangerInlineButtonText: {
+    color: "#8a2f1d",
+    fontWeight: "800"
+  },
   disabledButton: {
     opacity: 0.6
   },
   listSection: {
     gap: 10
+  },
+  listHeaderRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 2
+  },
+  listTitle: {
+    color: "#203b35",
+    fontSize: 21,
+    fontWeight: "800"
   },
   emptyPanel: {
     alignItems: "flex-start",
@@ -956,6 +1381,41 @@ function validateAuthForm(values, mode) {
     errors.push("Enter your password.");
   } else if (mode === "sign-up" && values.password.length < 6) {
     errors.push("Use a password with at least 6 characters.");
+  }
+
+  return errors;
+}
+
+function profileToForm(profile, fallbackEmail = "") {
+  const fallbackName = fallbackEmail ? fallbackEmail.split("@")[0] : "";
+
+  return {
+    display_name: profile?.display_name || fallbackName,
+    address_text: profile?.address_text || "",
+    address_lat: profile?.address_lat ?? null,
+    address_lng: profile?.address_lng ?? null,
+    collection_view: profile?.collection_view || "all",
+    collection_radius_km: String(profile?.collection_radius_km || 10)
+  };
+}
+
+function validateProfileForm(values) {
+  const errors = [];
+  const displayName = values.display_name.trim();
+  const radius = Number(values.collection_radius_km);
+
+  if (displayName.length < 2) {
+    errors.push("Add a username with at least 2 characters.");
+  }
+
+  if (values.collection_view === "nearby") {
+    if (!Number.isFinite(radius) || radius < 1 || radius > 100) {
+      errors.push("Choose a radius between 1 and 100 km.");
+    }
+
+    if (values.address_lat == null || values.address_lng == null) {
+      errors.push("Use your current location so nearby collections can be filtered from your address area.");
+    }
   }
 
   return errors;
