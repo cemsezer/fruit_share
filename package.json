@@ -1,0 +1,20 @@
+{
+  "name": "fruit-share",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Community fruit and veg sharing platform (web + mobile) using Supabase",
+  "workspaces": [
+    "apps/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev:client": "npm run dev -w @fruit-share/client",
+    "dev:api": "npm run dev -w @fruit-share/api",
+    "dev": "npm run dev:api",
+    "start": "npm run start -w @fruit-share/api",
+    "lint": "npm run lint -ws --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

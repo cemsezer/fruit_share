@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Fruit Share",
+    "slug": "fruit-share",
+    "scheme": "fruitshare",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}
