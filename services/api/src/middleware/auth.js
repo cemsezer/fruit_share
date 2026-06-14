@@ -1,12 +1,6 @@
-import jwt from "jsonwebtoken";
+import { supabaseAdmin } from "../supabase.js";
 
-const jwtSecret = process.env.SUPABASE_JWT_SECRET;
-
-if (!jwtSecret) {
-  throw new Error("Missing SUPABASE_JWT_SECRET");
-}
-
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Missing bearer token" });
@@ -14,13 +8,18 @@ export function requireAuth(req, res, next) {
 
   const token = authHeader.slice(7);
 
-  try {
-    const payload = jwt.verify(token, jwtSecret);
-    req.user = payload;
-    return next();
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+
+  if (error || !data.user) {
+    return res.status(401).json({ error: "Your sign-in session is no longer valid. Please sign out and sign in again." });
   }
+
+  req.user = {
+    sub: data.user.id,
+    email: data.user.email
+  };
+
+  return next();
 }
 
 export async function requireAdmin(req, res, next) {
@@ -28,7 +27,6 @@ export async function requireAdmin(req, res, next) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { supabaseAdmin } = await import("../supabase.js");
   const { data, error } = await supabaseAdmin
     .from("profiles")
     .select("role")

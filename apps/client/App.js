@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -22,23 +23,113 @@ WebBrowser.maybeCompleteAuthSession();
 
 const categories = ["Fruit", "Vegetable", "Herbs", "Other"];
 
+const initialListingForm = {
+  title: "",
+  category: "Fruit",
+  description: "",
+  quantity_note: "",
+  available_from: "",
+  available_until: "",
+  pickup_area: "",
+  location_lat: null,
+  location_lng: null
+};
+
+function toDateTimeInputValue(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return localDate.toISOString().slice(0, 16);
+}
+
+function fromDateTimeInputValue(value) {
+  return value ? new Date(value).toISOString() : "";
+}
+
+function normalizeDateTimeForApi(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toISOString();
+}
+
+function DateTimeField({ label, value, onChange }) {
+  if (Platform.OS === "web") {
+    return (
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>{label}</Text>
+        <input
+          type="datetime-local"
+          value={toDateTimeInputValue(value)}
+          onChange={(event) => onChange(fromDateTimeInputValue(event.target.value))}
+          style={webDateTimeInputStyle}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <TextInput
+      style={styles.input}
+      placeholder={`${label} (e.g. 2026-06-14T09:00:00Z)`}
+      value={value}
+      onChangeText={onChange}
+    />
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [listings, setListings] = useState([]);
   const [loadingListings, setLoadingListings] = useState(false);
-  const [form, setForm] = useState({
-    title: "",
-    category: "Fruit",
-    description: "",
-    quantity_note: "",
-    available_from: "",
-    available_until: "",
-    location_lat: "",
-    location_lng: ""
-  });
+  const [activeScreen, setActiveScreen] = useState("home");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [listErrors, setListErrors] = useState([]);
+  const [listStatus, setListStatus] = useState("");
+  const [authForm, setAuthForm] = useState({ email: "", password: "" });
+  const [form, setForm] = useState(initialListingForm);
+  const [formErrors, setFormErrors] = useState([]);
+  const [formStatus, setFormStatus] = useState("");
+  const [publishing, setPublishing] = useState(false);
+  const [editingListingId, setEditingListingId] = useState(null);
+  const [deletingListingId, setDeletingListingId] = useState(null);
+  const [authErrors, setAuthErrors] = useState([]);
+  const [authStatus, setAuthStatus] = useState("");
+  const [authAction, setAuthAction] = useState("");
 
   const redirectTo = useMemo(() => Linking.createURL("/auth/callback"), []);
+  const filteredListings = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    if (!query) {
+      return listings;
+    }
+
+    return listings.filter((item) => {
+      const searchableText = [
+        item.title,
+        item.category,
+        item.description,
+        item.quantity_note,
+        item.pickup_area
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return searchableText.includes(query);
+    });
+  }, [listings, searchQuery]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -62,28 +153,88 @@ export default function App() {
   async function loadListings() {
     try {
       setLoadingListings(true);
+      setListErrors([]);
       const data = await apiFetch("/api/listings");
       setListings(data.listings || []);
     } catch (error) {
-      Alert.alert("Error", error.message);
+      setListErrors([error.message]);
     } finally {
       setLoadingListings(false);
     }
   }
 
   async function signInWithProvider(provider) {
+    setAuthErrors([]);
+    setAuthStatus("");
+
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo }
     });
 
     if (error) {
-      Alert.alert("Auth error", error.message);
+      setAuthErrors([error.message]);
       return;
     }
 
     if (data?.url) {
       await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
+    }
+  }
+
+  async function signInWithEmail() {
+    const validationErrors = validateAuthForm(authForm, "sign-in");
+    setAuthErrors(validationErrors);
+    setAuthStatus("");
+
+    if (validationErrors.length > 0) {
+      return;
+    }
+
+    try {
+      setAuthAction("sign-in");
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authForm.email.trim(),
+        password: authForm.password
+      });
+
+      if (error) {
+        setAuthErrors([formatAuthError(error.message)]);
+        return;
+      }
+
+      setAuthErrors([]);
+      setAuthStatus("Signed in successfully.");
+    } finally {
+      setAuthAction("");
+    }
+  }
+
+  async function signUpWithEmail() {
+    const validationErrors = validateAuthForm(authForm, "sign-up");
+    setAuthErrors(validationErrors);
+    setAuthStatus("");
+
+    if (validationErrors.length > 0) {
+      return;
+    }
+
+    try {
+      setAuthAction("sign-up");
+      const { data, error } = await supabase.auth.signUp({
+        email: authForm.email.trim(),
+        password: authForm.password
+      });
+
+      if (error) {
+        setAuthErrors([formatAuthError(error.message)]);
+        return;
+      }
+
+      setAuthErrors([]);
+      setAuthStatus(data.session ? "Account created and signed in." : "Account created. Check your email to confirm your account.");
+    } finally {
+      setAuthAction("");
     }
   }
 
@@ -102,40 +253,106 @@ export default function App() {
     const roundedLng = Number(position.coords.longitude.toFixed(3));
     setForm((prev) => ({
       ...prev,
-      location_lat: String(roundedLat),
-      location_lng: String(roundedLng)
+      location_lat: roundedLat,
+      location_lng: roundedLng
     }));
   }
 
   async function submitListing() {
+    setFormStatus("");
+
     if (!session?.access_token) {
-      Alert.alert("Sign in required", "Please sign in first.");
+      setFormErrors(["Please sign in before publishing a listing."]);
+      return;
+    }
+
+    const validationErrors = validateListingForm(form);
+    setFormErrors(validationErrors);
+
+    if (validationErrors.length > 0) {
       return;
     }
 
     try {
-      await apiFetch("/api/listings", session.access_token, {
-        method: "POST",
+      setPublishing(true);
+      await apiFetch(editingListingId ? `/api/listings/${editingListingId}` : "/api/listings", session.access_token, {
+        method: editingListingId ? "PUT" : "POST",
         body: JSON.stringify({
           ...form,
-          location_lat: Number(form.location_lat),
-          location_lng: Number(form.location_lng)
+          title: form.title.trim(),
+          description: form.description.trim(),
+          quantity_note: form.quantity_note.trim(),
+          pickup_area: form.pickup_area.trim(),
+          available_from: normalizeDateTimeForApi(form.available_from),
+          available_until: form.available_until ? normalizeDateTimeForApi(form.available_until) : null
         })
       });
-      setForm({
-        title: "",
-        category: "Fruit",
-        description: "",
-        quantity_note: "",
-        available_from: "",
-        available_until: "",
-        location_lat: "",
-        location_lng: ""
-      });
+      setForm(initialListingForm);
+      setEditingListingId(null);
+      setFormErrors([]);
+      setListStatus(editingListingId ? "Listing updated." : "Listing published. It is now visible to collectors.");
       await loadListings();
-      Alert.alert("Success", "Listing created.");
+      setActiveScreen("home");
     } catch (error) {
-      Alert.alert("Create failed", error.message);
+      setFormErrors([error.message]);
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  function startEditingListing(listing) {
+    setEditingListingId(listing.id);
+    setActiveScreen("publish");
+    setFormErrors([]);
+    setFormStatus("");
+    setForm({
+      title: listing.title || "",
+      category: listing.category || "Fruit",
+      description: listing.description || "",
+      quantity_note: listing.quantity_note || "",
+      available_from: listing.available_from || "",
+      available_until: listing.available_until || "",
+      pickup_area: listing.pickup_area || "",
+      location_lat: listing.location_lat ?? null,
+      location_lng: listing.location_lng ?? null
+    });
+  }
+
+  function cancelEditingListing() {
+    setEditingListingId(null);
+    setForm(initialListingForm);
+    setFormErrors([]);
+    setFormStatus("");
+  }
+
+  async function deleteListing(listing) {
+    if (!session?.access_token) {
+      setFormErrors(["Please sign in before deleting a listing."]);
+      return;
+    }
+
+    const confirmed = Platform.OS === "web"
+      ? globalThis.confirm?.(`Delete "${listing.title}"? Collectors will no longer see it.`)
+      : true;
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingListingId(listing.id);
+      setListErrors([]);
+      setListStatus("");
+      await apiFetch(`/api/listings/${listing.id}`, session.access_token, { method: "DELETE" });
+      if (editingListingId === listing.id) {
+        cancelEditingListing();
+      }
+      setListStatus("Listing deleted.");
+      await loadListings();
+    } catch (error) {
+      setListErrors([error.message]);
+    } finally {
+      setDeletingListingId(null);
     }
   }
 
@@ -166,111 +383,231 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.heading}>Fruit Share</Text>
-        <Text style={styles.subheading}>Reduce local produce waste. Share and collect nearby.</Text>
+        <View style={styles.headerPanel}>
+          <View style={styles.headerTextBlock}>
+            <Text style={styles.kicker}>Local surplus produce</Text>
+            <Text style={styles.heading}>Fruit Share</Text>
+            <Text style={styles.subheading}>Find garden fruit and veg nearby, or offer what would otherwise go to waste.</Text>
+          </View>
+          <Pressable style={styles.headerButton} onPress={() => setActiveScreen("publish")}>
+            <Text style={styles.headerButtonText}>Offer Produce</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.navRow}>
+          <Pressable
+            style={[styles.navButton, activeScreen === "home" && styles.navButtonActive]}
+            onPress={() => setActiveScreen("home")}
+          >
+            <Text style={activeScreen === "home" ? styles.navButtonTextActive : styles.navButtonText}>Browse</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.navButton, activeScreen === "publish" && styles.navButtonActive]}
+            onPress={() => setActiveScreen("publish")}
+          >
+            <Text style={activeScreen === "publish" ? styles.navButtonTextActive : styles.navButtonText}>{editingListingId ? "Edit" : "Publish"}</Text>
+          </Pressable>
+        </View>
 
         <View style={styles.authBox}>
           {session ? (
-            <>
-              <Text style={styles.userText}>Signed in as: {session.user?.email}</Text>
+            <View style={styles.accountRow}>
+              <View>
+                <Text style={styles.accountLabel}>Signed in</Text>
+                <Text style={styles.userText}>{session.user?.email}</Text>
+              </View>
               <Pressable style={styles.secondaryButton} onPress={signOut}>
                 <Text style={styles.secondaryButtonText}>Sign Out</Text>
               </Pressable>
-            </>
+            </View>
           ) : (
             <View style={styles.authButtons}>
-              <Pressable style={styles.primaryButton} onPress={() => signInWithProvider("google")}>
+              <TextInput
+                style={styles.input}
+                placeholder="Email"
+                autoCapitalize="none"
+                keyboardType="email-address"
+                value={authForm.email}
+                onChangeText={(value) => setAuthForm((prev) => ({ ...prev, email: value }))}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Password"
+                secureTextEntry
+                value={authForm.password}
+                onChangeText={(value) => setAuthForm((prev) => ({ ...prev, password: value }))}
+              />
+
+              {authErrors.length > 0 ? (
+                <View style={styles.errorBox}>
+                  {authErrors.map((error) => (
+                    <Text key={error} style={styles.errorText}>{error}</Text>
+                  ))}
+                </View>
+              ) : null}
+
+              {authStatus ? <Text style={styles.successText}>{authStatus}</Text> : null}
+
+              <View style={styles.authActionRow}>
+                <Pressable
+                  style={[styles.primaryButton, styles.authActionButton, authAction && styles.disabledButton]}
+                  onPress={signInWithEmail}
+                  disabled={Boolean(authAction)}
+                >
+                  <Text style={styles.primaryButtonText}>{authAction === "sign-in" ? "Signing in..." : "Sign In"}</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.secondaryButton, styles.authActionButton, authAction && styles.disabledButton]}
+                  onPress={signUpWithEmail}
+                  disabled={Boolean(authAction)}
+                >
+                  <Text style={styles.secondaryButtonText}>{authAction === "sign-up" ? "Creating..." : "Sign Up"}</Text>
+                </Pressable>
+              </View>
+              <Pressable style={[styles.primaryButton, authAction && styles.disabledButton]} onPress={() => signInWithProvider("google")} disabled={Boolean(authAction)}>
                 <Text style={styles.primaryButtonText}>Continue with Google</Text>
-              </Pressable>
-              <Pressable style={styles.secondaryButton} onPress={() => signInWithProvider("github")}>
-                <Text style={styles.secondaryButtonText}>Continue with GitHub</Text>
               </Pressable>
             </View>
           )}
         </View>
 
-        <View style={styles.formCard}>
-          <Text style={styles.formTitle}>Offer Produce</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Title (e.g. Organic lemons)"
-            value={form.title}
-            onChangeText={(value) => setForm((prev) => ({ ...prev, title: value }))}
-          />
+        {activeScreen === "home" ? (
+          <View style={styles.screenStack}>
+            <View style={styles.searchPanel}>
+              <View>
+                <Text style={styles.sectionEyebrow}>Available now</Text>
+                <Text style={styles.screenTitle}>{filteredListings.length} listings</Text>
+              </View>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search location, description, produce"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                autoCapitalize="none"
+              />
+            </View>
 
-          <View style={styles.categoryRow}>
-            {categories.map((item) => (
-              <Pressable
-                key={item}
-                style={[styles.categoryChip, form.category === item && styles.categoryChipActive]}
-                onPress={() => setForm((prev) => ({ ...prev, category: item }))}
-              >
-                <Text style={form.category === item ? styles.categoryChipTextActive : styles.categoryChipText}>{item}</Text>
-              </Pressable>
-            ))}
-          </View>
+            {listErrors.length > 0 ? (
+              <View style={styles.errorBox}>
+                {listErrors.map((error) => (
+                  <Text key={error} style={styles.errorText}>{error}</Text>
+                ))}
+              </View>
+            ) : null}
 
-          <TextInput
-            style={styles.input}
-            placeholder="Description"
-            value={form.description}
-            onChangeText={(value) => setForm((prev) => ({ ...prev, description: value }))}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Quantity note (e.g. 2 bags)"
-            value={form.quantity_note}
-            onChangeText={(value) => setForm((prev) => ({ ...prev, quantity_note: value }))}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Available from (ISO e.g. 2026-06-14T09:00:00Z)"
-            value={form.available_from}
-            onChangeText={(value) => setForm((prev) => ({ ...prev, available_from: value }))}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Available until (ISO e.g. 2026-06-15T18:00:00Z)"
-            value={form.available_until}
-            onChangeText={(value) => setForm((prev) => ({ ...prev, available_until: value }))}
-          />
+            {listStatus ? <Text style={styles.successText}>{listStatus}</Text> : null}
+            {loadingListings ? <Text style={styles.mutedText}>Loading listings...</Text> : null}
 
-          <View style={styles.locationRow}>
-            <TextInput
-              style={[styles.input, styles.locationInput]}
-              placeholder="Approx latitude"
-              value={form.location_lat}
-              onChangeText={(value) => setForm((prev) => ({ ...prev, location_lat: value }))}
-            />
-            <TextInput
-              style={[styles.input, styles.locationInput]}
-              placeholder="Approx longitude"
-              value={form.location_lng}
-              onChangeText={(value) => setForm((prev) => ({ ...prev, location_lng: value }))}
+            <FlatList
+              data={filteredListings}
+              keyExtractor={(item) => item.id}
+              scrollEnabled={false}
+              ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+              renderItem={({ item }) => (
+                <ListingCard
+                  item={item}
+                  onRequest={requestListing}
+                  onEdit={startEditingListing}
+                  onDelete={deleteListing}
+                  canManage={session?.user?.id === item.owner_id}
+                  isDeleting={deletingListingId === item.id}
+                />
+              )}
+              ListEmptyComponent={(
+                <View style={styles.emptyPanel}>
+                  <Text style={styles.emptyTitle}>{searchQuery ? "No matches found" : "No listings yet"}</Text>
+                  <Text style={styles.emptyText}>{searchQuery ? "Try a different pickup area or produce description." : "Be the first to offer surplus fruit or veg nearby."}</Text>
+                  <Pressable style={styles.primaryButton} onPress={() => setActiveScreen("publish")}>
+                    <Text style={styles.primaryButtonText}>Offer Produce</Text>
+                  </Pressable>
+                </View>
+              )}
             />
           </View>
+        ) : (
+          <View style={styles.formCard}>
+            <View style={styles.formHeaderRow}>
+              <View>
+                <Text style={styles.sectionEyebrow}>{editingListingId ? "Update listing" : "New listing"}</Text>
+                <Text style={styles.formTitle}>{editingListingId ? "Edit Produce" : "Offer Produce"}</Text>
+              </View>
+              {editingListingId ? (
+                <Pressable style={styles.smallButton} onPress={cancelEditingListing}>
+                  <Text style={styles.smallButtonText}>Cancel</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            <TextInput
+              style={styles.input}
+              placeholder="Title (e.g. Organic lemons)"
+              value={form.title}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, title: value }))}
+            />
 
-          <Pressable style={styles.secondaryButton} onPress={fillApproxLocation}>
-            <Text style={styles.secondaryButtonText}>Use My Approx Location</Text>
-          </Pressable>
+            <View style={styles.categoryRow}>
+              {categories.map((item) => (
+                <Pressable
+                  key={item}
+                  style={[styles.categoryChip, form.category === item && styles.categoryChipActive]}
+                  onPress={() => setForm((prev) => ({ ...prev, category: item }))}
+                >
+                  <Text style={form.category === item ? styles.categoryChipTextActive : styles.categoryChipText}>{item}</Text>
+                </Pressable>
+              ))}
+            </View>
 
-          <Pressable style={styles.primaryButton} onPress={submitListing}>
-            <Text style={styles.primaryButtonText}>Publish Listing</Text>
-          </Pressable>
-        </View>
+            <TextInput
+              style={styles.input}
+              placeholder="Description"
+              value={form.description}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, description: value }))}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Quantity note (e.g. 2 bags)"
+              value={form.quantity_note}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, quantity_note: value }))}
+            />
+            <DateTimeField
+              label="Available from"
+              value={form.available_from}
+              onChange={(value) => setForm((prev) => ({ ...prev, available_from: value }))}
+            />
+            <DateTimeField
+              label="Available until (optional)"
+              value={form.available_until}
+              onChange={(value) => setForm((prev) => ({ ...prev, available_until: value }))}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Pickup area (e.g. North Park, near Oak Street)"
+              value={form.pickup_area}
+              onChangeText={(value) => setForm((prev) => ({ ...prev, pickup_area: value }))}
+            />
 
-        <View style={styles.listSection}>
-          <Text style={styles.formTitle}>Available Listings</Text>
-          {loadingListings ? <Text>Loading listings...</Text> : null}
-          <FlatList
-            data={listings}
-            keyExtractor={(item) => item.id}
-            scrollEnabled={false}
-            ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-            renderItem={({ item }) => <ListingCard item={item} onRequest={requestListing} />}
-            ListEmptyComponent={<Text style={styles.emptyText}>No listings yet.</Text>}
-          />
-        </View>
+            {form.location_lat != null && form.location_lng != null ? (
+              <Text style={styles.locationStatus}>Approx map point saved from this device.</Text>
+            ) : null}
+
+            {formErrors.length > 0 ? (
+              <View style={styles.errorBox}>
+                {formErrors.map((error) => (
+                  <Text key={error} style={styles.errorText}>{error}</Text>
+                ))}
+              </View>
+            ) : null}
+
+            {formStatus ? <Text style={styles.successText}>{formStatus}</Text> : null}
+
+            <Pressable style={styles.secondaryButton} onPress={fillApproxLocation}>
+              <Text style={styles.secondaryButtonText}>Use My Approx Location</Text>
+            </Pressable>
+
+            <Pressable style={[styles.primaryButton, publishing && styles.disabledButton]} onPress={submitListing} disabled={publishing}>
+              <Text style={styles.primaryButtonText}>{publishing ? (editingListingId ? "Saving..." : "Publishing...") : (editingListingId ? "Save Changes" : "Publish Listing")}</Text>
+            </Pressable>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -279,7 +616,7 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: "#f4f1ea"
+    backgroundColor: "#eef3ef"
   },
   centered: {
     flex: 1,
@@ -288,50 +625,175 @@ const styles = StyleSheet.create({
   },
   container: {
     padding: 16,
-    gap: 12
+    gap: 12,
+    paddingBottom: 28
+  },
+  headerPanel: {
+    backgroundColor: "#203b35",
+    borderRadius: 18,
+    gap: 16,
+    padding: 18
+  },
+  headerTextBlock: {
+    gap: 6
+  },
+  kicker: {
+    color: "#f7c66a",
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase"
   },
   heading: {
-    fontSize: 30,
+    fontSize: 34,
     fontWeight: "800",
-    color: "#1c2a1d"
+    color: "#ffffff"
   },
   subheading: {
-    color: "#445344"
+    color: "#d8e7dd",
+    lineHeight: 20
+  },
+  headerButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "#f7c66a",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  headerButtonText: {
+    color: "#21322f",
+    fontWeight: "800"
+  },
+  navRow: {
+    backgroundColor: "#dde8df",
+    borderRadius: 14,
+    flexDirection: "row",
+    gap: 6,
+    padding: 5
+  },
+  navButton: {
+    alignItems: "center",
+    borderRadius: 10,
+    flex: 1,
+    paddingVertical: 10
+  },
+  navButtonActive: {
+    backgroundColor: "#ffffff"
+  },
+  navButtonText: {
+    color: "#52645a",
+    fontWeight: "800"
+  },
+  navButtonTextActive: {
+    color: "#203b35",
+    fontWeight: "800"
   },
   authBox: {
     backgroundColor: "#ffffff",
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 12,
     borderWidth: 1,
-    borderColor: "#e6e1da"
+    borderColor: "#dce6df"
   },
   authButtons: {
     gap: 8
   },
+  authActionRow: {
+    flexDirection: "row",
+    gap: 8
+  },
+  authActionButton: {
+    flex: 1
+  },
+  accountRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12
+  },
+  accountLabel: {
+    color: "#6b7a72",
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
   userText: {
-    marginBottom: 10,
-    color: "#364436"
+    color: "#253a33",
+    fontWeight: "700"
+  },
+  screenStack: {
+    gap: 12
+  },
+  searchPanel: {
+    backgroundColor: "#ffffff",
+    borderColor: "#dce6df",
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 12,
+    padding: 14
+  },
+  sectionEyebrow: {
+    color: "#557166",
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  screenTitle: {
+    color: "#203b35",
+    fontSize: 22,
+    fontWeight: "800"
+  },
+  searchInput: {
+    borderWidth: 1,
+    borderColor: "#c9d8cf",
+    backgroundColor: "#f8fbf8",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 11
   },
   formCard: {
     backgroundColor: "#fff",
-    borderRadius: 14,
-    padding: 12,
+    borderRadius: 16,
+    padding: 14,
     borderWidth: 1,
-    borderColor: "#e6e1da",
-    gap: 8
+    borderColor: "#dce6df",
+    gap: 10
   },
   formTitle: {
     fontSize: 20,
     fontWeight: "700",
     color: "#2a3729"
   },
-  input: {
-    borderWidth: 1,
-    borderColor: "#d8d2c8",
-    backgroundColor: "#fcfbf8",
+  formHeaderRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8
+  },
+  smallButton: {
+    backgroundColor: "#e8efe4",
     borderRadius: 10,
     paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  smallButtonText: {
+    color: "#2d3c2b",
+    fontWeight: "700"
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#c9d8cf",
+    backgroundColor: "#f8fbf8",
+    borderRadius: 12,
+    paddingHorizontal: 10,
     paddingVertical: 10
+  },
+  fieldGroup: {
+    gap: 6
+  },
+  fieldLabel: {
+    color: "#354532",
+    fontSize: 13,
+    fontWeight: "700"
   },
   categoryRow: {
     flexDirection: "row",
@@ -340,11 +802,11 @@ const styles = StyleSheet.create({
   },
   categoryChip: {
     borderWidth: 1,
-    borderColor: "#ccd6cb",
-    borderRadius: 999,
+    borderColor: "#c9d8cf",
+    borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 7,
-    backgroundColor: "#eff4ee"
+    backgroundColor: "#f5faf6"
   },
   categoryChipActive: {
     backgroundColor: "#314d2f",
@@ -356,16 +818,34 @@ const styles = StyleSheet.create({
   categoryChipTextActive: {
     color: "#ffffff"
   },
-  locationRow: {
-    flexDirection: "row",
-    gap: 8
+  locationStatus: {
+    color: "#52634f",
+    fontSize: 13
   },
-  locationInput: {
-    flex: 1
+  errorBox: {
+    backgroundColor: "#fff1ed",
+    borderColor: "#e8b4a5",
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: 4,
+    padding: 10
+  },
+  errorText: {
+    color: "#8a2f1d",
+    fontSize: 13
+  },
+  successText: {
+    backgroundColor: "#edf7ed",
+    borderColor: "#b9d8b9",
+    borderRadius: 10,
+    borderWidth: 1,
+    color: "#245b2a",
+    fontSize: 13,
+    padding: 10
   },
   primaryButton: {
-    backgroundColor: "#314d2f",
-    borderRadius: 10,
+    backgroundColor: "#315c72",
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     alignItems: "center"
@@ -375,8 +855,8 @@ const styles = StyleSheet.create({
     fontWeight: "700"
   },
   secondaryButton: {
-    backgroundColor: "#e8efe4",
-    borderRadius: 10,
+    backgroundColor: "#e8f1ec",
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     alignItems: "center"
@@ -385,10 +865,116 @@ const styles = StyleSheet.create({
     color: "#2d3c2b",
     fontWeight: "700"
   },
+  disabledButton: {
+    opacity: 0.6
+  },
   listSection: {
     gap: 10
   },
+  emptyPanel: {
+    alignItems: "flex-start",
+    backgroundColor: "#ffffff",
+    borderColor: "#dce6df",
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 10,
+    padding: 16
+  },
+  emptyTitle: {
+    color: "#203b35",
+    fontSize: 18,
+    fontWeight: "800"
+  },
   emptyText: {
+    color: "#5f6e5f"
+  },
+  mutedText: {
     color: "#5f6e5f"
   }
 });
+
+const webDateTimeInputStyle = {
+  width: "100%",
+  borderWidth: 1,
+  borderStyle: "solid",
+  borderColor: "#c9d8cf",
+  backgroundColor: "#f8fbf8",
+  borderRadius: 12,
+  boxSizing: "border-box",
+  color: "#233220",
+  fontSize: 14,
+  padding: 10
+};
+
+function validateListingForm(values) {
+  const errors = [];
+  const title = values.title.trim();
+  const pickupArea = values.pickup_area.trim();
+  const fromDate = values.available_from ? new Date(values.available_from) : null;
+  const untilDate = values.available_until ? new Date(values.available_until) : null;
+
+  if (title.length < 3) {
+    errors.push("Add a title with at least 3 characters, such as 'Organic lemons'.");
+  }
+
+  if (!values.quantity_note.trim()) {
+    errors.push("Add a quantity note, such as 'one basket' or 'about 2 kg'.");
+  }
+
+  if (!values.available_from) {
+    errors.push("Choose when collection can start.");
+  } else if (Number.isNaN(fromDate.getTime())) {
+    errors.push("Choose a valid start date and time.");
+  }
+
+  if (values.available_until && Number.isNaN(untilDate.getTime())) {
+    errors.push("Choose a valid end date and time.");
+  }
+
+  if (fromDate && untilDate && !Number.isNaN(fromDate.getTime()) && !Number.isNaN(untilDate.getTime()) && untilDate <= fromDate) {
+    errors.push("The collection end time must be after the start time.");
+  }
+
+  if (pickupArea.length < 2) {
+    errors.push("Add a pickup area, such as 'North Park' or 'near Oak Street'.");
+  }
+
+  return errors;
+}
+
+function validateAuthForm(values, mode) {
+  const errors = [];
+  const email = values.email.trim();
+
+  if (!email) {
+    errors.push("Enter your email address.");
+  } else if (!/^\S+@\S+\.\S+$/.test(email)) {
+    errors.push("Enter a valid email address.");
+  }
+
+  if (!values.password) {
+    errors.push("Enter your password.");
+  } else if (mode === "sign-up" && values.password.length < 6) {
+    errors.push("Use a password with at least 6 characters.");
+  }
+
+  return errors;
+}
+
+function formatAuthError(message) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes("invalid login credentials")) {
+    return "The email or password is incorrect.";
+  }
+
+  if (normalized.includes("email not confirmed")) {
+    return "Please confirm your email before signing in.";
+  }
+
+  if (normalized.includes("user already registered") || normalized.includes("already registered")) {
+    return "An account already exists for this email. Try signing in instead.";
+  }
+
+  return message;
+}

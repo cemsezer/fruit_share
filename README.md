@@ -65,7 +65,10 @@ update public.profiles set role = 'admin' where email = 'you@example.com';
 
 ## 5. Run API
 
+From a fresh terminal:
+
 ```bash
+cd C:\git\fruit_share
 npm run dev:api
 ```
 
@@ -73,9 +76,29 @@ API health check:
 
 - `GET http://localhost:4000/health`
 
+You can also check it from PowerShell:
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:4000/health -Method Get
+```
+
 ## 6. Run Expo app
 
+Open a second fresh terminal and run the web app:
+
 ```bash
+cd C:\git\fruit_share
+npm run web -w @fruit-share/client
+```
+
+The web app should be available at:
+
+- `http://localhost:8081`
+
+For mobile development instead, run:
+
+```bash
+cd C:\git\fruit_share
 npm run dev:client
 ```
 
@@ -84,6 +107,36 @@ Press:
 - `a` Android emulator
 - `i` iOS simulator (macOS)
 - `w` web
+
+## Fresh Local Run Checklist
+
+Use this when starting from closed terminals after the project is already installed and configured.
+
+Terminal 1, API server:
+
+```powershell
+cd C:\git\fruit_share
+npm run dev:api
+```
+
+Terminal 2, web client:
+
+```powershell
+cd C:\git\fruit_share
+npm run web -w @fruit-share/client
+```
+
+Then open:
+
+- API health: `http://localhost:4000/health`
+- Web app: `http://localhost:8081`
+
+If dependencies are missing on a new machine, run this once first:
+
+```powershell
+cd C:\git\fruit_share
+npm install
+```
 
 ## 7. Social login setup
 

@@ -10,11 +10,14 @@ import requestsRoutes from "./routes/requests.js";
 
 const app = express();
 const port = process.env.PORT || 4000;
-const clientOrigin = process.env.CLIENT_ORIGIN || "*";
+const clientOrigins = (process.env.CLIENT_ORIGIN || "*")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 app.use(
   cors({
-    origin: clientOrigin === "*" ? true : clientOrigin
+    origin: clientOrigins.includes("*") ? true : clientOrigins
   })
 );
 app.use(express.json());

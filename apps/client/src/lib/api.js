@@ -19,8 +19,37 @@ export async function apiFetch(path, token, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(data?.error || "Request failed");
+    throw new Error(formatApiError(data?.error) || data?.message || "Request failed");
   }
 
   return data;
+}
+
+function formatApiError(error) {
+  if (!error) {
+    return "";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error.fieldErrors) {
+    const messages = Object.entries(error.fieldErrors)
+      .flatMap(([field, fieldMessages]) => fieldMessages.map((message) => `${formatFieldName(field)}: ${message}`));
+
+    if (messages.length > 0) {
+      return messages.join("\n");
+    }
+  }
+
+  if (error.formErrors?.length) {
+    return error.formErrors.join("\n");
+  }
+
+  return "The request could not be completed. Please check the form and try again.";
+}
+
+function formatFieldName(field) {
+  return field.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase());
 }
